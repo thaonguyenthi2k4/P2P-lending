@@ -1,275 +1,267 @@
-import React, { useState, useEffect } from 'react';
-import { Container, Button, Table, Card, Badge, Toast } from 'react-bootstrap';
-import { ethers } from 'ethers';
-import LendingPlatformABI from '../contracts/LendingPlatform.json';
-import Address from '../contracts/contract-address.json'
+import React, { useEffect, useMemo, useState } from "react";
+import { Container, Button, Table, Card, Badge, Toast } from "react-bootstrap";
+import { ethers } from "ethers";
+import LendingPlatformABI from "../contracts/LendingPlatform.abi.json";
+import addresses from "../contracts/contract-address.json";
 
 const LoanState = { REPAID: "Repaid", ACTIVE: "Active", EXPIRED: "Expired" };
 
 const Lender = () => {
-  // Core application state
-  const [account, setAccount] = useState('');
-  const [balance, setBalance] = useState('');
+  const abi = useMemo(() => LendingPlatformABI, []);
+
+  const [account, setAccount] = useState("");
+  const [balance, setBalance] = useState("");
   const [contract, setContract] = useState(null);
+
   const [loanRequests, setLoanRequests] = useState([]);
   const [activeLoans, setActiveLoans] = useState([]);
-  const [toast, setToast] = useState({ show: false, message: '', variant: 'success' });
 
-  // Initialize smart contract 
+  const [toast, setToast] = useState({ show: false, message: "", variant: "success" });
+  const showToast = (message, variant = "success") =>
+    setToast({ show: true, message, variant });
+
   useEffect(() => {
     const init = async () => {
-      try {
-        await connectWallet();
-        await loadContract();
-        await loadLoanRequests();
-        await loadActiveLoans();
-      } catch (error) {
-        console.error("Initialization error:", error);
-        showToast("Error initializing app", 'danger');
-      }
-    };
-    init();
-  }, []);
-
-  // Connect wallet, set up account listener
-  const connectWallet = async () => {
-    if (typeof window.ethereum !== 'undefined') {
-      try {
-        const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-        setAccount(accounts[0]);
-        await updateBalance(accounts[0]);
-
-        // Listen for account changes when account changing on metamask
-        window.ethereum.on('accountsChanged', async (newAccounts) => {
-          setAccount(newAccounts[0]);
-          await updateBalance(newAccounts[0]);
-        });
-  
-        //Update UI
-        await loadLoanRequests();
-        await loadActiveLoans();
-      } catch (error) {
-        console.error("Error connecting wallet:", error);
-        showToast("Error connecting to wallet", 'danger');
-      }
-    } else {
-      showToast('Metamask not detected', 'danger');
-    }
-  };
-
-  // Initialize smart contract
-  const loadContract = async () => {
-    if (typeof window.ethereum !== 'undefined') {
-      try {
-        const provider = new ethers.providers.Web3Provider(window.ethereum);
-        const signer = provider.getSigner();
-        const contractAddress = Address.LendingPlatform;
-        const contractInstance = new ethers.Contract(contractAddress, LendingPlatformABI.abi, signer);
-        setContract(contractInstance);
-
-        //Update UI
-        await loadLoanRequests();
-        await loadActiveLoans();
-      } catch (error) {
-        console.error("Error loading contract:", error);
-        showToast("Error loading contract", 'danger');
-      }
-    }
-  };
-
-
-  // account ETH balance
-  const updateBalance = async (address) => {
-    if (typeof window.ethereum !== 'undefined') {
-      const provider = new ethers.providers.Web3Provider(window.ethereum);
-      const balance = await provider.getBalance(address);
-      setBalance(ethers.utils.formatEther(balance));
-    }
-  };
-
-  // Load active loan requests that can be funded
-  const loadLoanRequests = async () => {
-    if (!contract || !account) return;
-    try {
-      const today = new Date();
-      const [, , requestIds, requests] = await contract.getAllActiveLoans();
-      const requestsData = requestIds.map((id, index) => ({
-        requestId: id.toString(),
-        borrower: requests[index].borrower,
-        amount: ethers.utils.formatEther(requests[index].loanAmount),
-        duration: requests[index].duration.toString(),
-        stake: ethers.utils.formatEther(requests[index].stake),
-        interestRate: requests[index].interestRate.toString(),
-        isActive: requests[index].isActive
-      }));
-
-      // Filter inactive requests and lender's own requests
-      setLoanRequests(requestsData.filter(req => 
-        req.isActive && req.borrower.toLowerCase() !== account.toLowerCase()
-      ));
-    } catch (error) {
-      console.error("Error loading requests:", error);
-      showToast("Error loading loan requests", 'danger');
-    }
-  };
-
-  // Load loans funded by lender
-  const loadActiveLoans = async () => {
-    if (!contract || !account) return;
-    try {
-      const [loanIds, loans] = await contract.getAllActiveLoans();
-      const activeLoansData = loans
-        .map((loan, index) => ({
-          loanId: loanIds[index].toString(),
-          borrower: loan.borrower,
-          lender: loan.lender,
-          amount: ethers.utils.formatEther(loan.loanAmount),
-          stake: ethers.utils.formatEther(loan.stake),
-          endTime: new Date(Number(loan.endTime) * 1000).toLocaleString(),
-          interestRate: loan.interestRate.toString(),
-          initialEthPrice: ethers.utils.formatUnits(loan.initialEthPrice, 18),
-          state: loan.isRepaid ? LoanState.REPAID : (Date.now() > Number(loan.endTime) * 1000 ? LoanState.EXPIRED : LoanState.ACTIVE)
-        }))
-        .filter(loan => loan.lender.toLowerCase() === account.toLowerCase());
-      setActiveLoans(activeLoansData);
-    } catch (error) {
-      console.error("Error loading active loans:", error);
-      showToast("Error loading active loans", 'danger');
-    }
-  };
-  
-  // Fund selected loan
-  const fundLoan = async (requestId, amount) => {
-    if (!contract) return;
-    try {
-      const amountInWei = ethers.utils.parseEther(amount);
-      const currentEthPrice = await getEthPrice();
-      
-      if (!currentEthPrice) {
-        showToast("Error fetching ETH price", 'danger');
+      if (!window.ethereum) {
+        showToast("Metamask not detected", "danger");
         return;
       }
-  
-      const provider = new ethers.providers.Web3Provider(window.ethereum);
-      const nonce = await provider.getTransactionCount(account);
-      
-      const tx = await contract.fundLoanRequest(
-        requestId,
-        ethers.utils.parseUnits(currentEthPrice.toString(), 18),
-        { value: amountInWei, nonce, gasLimit: ethers.utils.hexlify(1000000) }
-      );
-      
-      await tx.wait();
 
-      //Update UI
-      await loadLoanRequests();
-      await loadActiveLoans();
-      await updateBalance(account);
-      showToast("Loan funded successfully", 'success');
-    } catch (error) {
-      console.error("Error funding loan:", error);
-      showToast(error.reason || "Error funding loan", 'danger');
-    }
+      const provider = new ethers.providers.Web3Provider(window.ethereum);
+      await provider.send("eth_requestAccounts", []);
+      const accounts = await provider.listAccounts();
+
+      if (accounts.length > 0) setAccount(accounts[0]);
+
+      window.ethereum.on("accountsChanged", (accs) => {
+        setAccount(accs[0] || "");
+      });
+    };
+
+    init();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const updateBalance = async (address) => {
+    const provider = new ethers.providers.Web3Provider(window.ethereum);
+    const bal = await provider.getBalance(address);
+    setBalance(ethers.utils.formatEther(bal));
   };
 
+  useEffect(() => {
+    const load = async () => {
+      if (!window.ethereum || !account) return;
 
-  // API to retrieve USD-ETH price
+      const provider = new ethers.providers.Web3Provider(window.ethereum);
+      const signer = provider.getSigner();
+
+      const instance = new ethers.Contract(addresses.LendingPlatform, abi, signer);
+      setContract(instance);
+
+      await updateBalance(account);
+    };
+
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [account, abi]);
+
+  useEffect(() => {
+    if (contract && account) {
+      loadLoanRequests();
+      loadActiveLoans();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contract, account]);
+
   const getEthPrice = async () => {
     try {
-      const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
-      const data = await response.json();
+      const res = await fetch(
+        "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd"
+      );
+      const data = await res.json();
       return data.ethereum.usd;
-    } catch (error) {
-      console.error("Error fetching ETH price:", error);
+    } catch (e) {
+      console.error(e);
       return null;
-    }
-  };  
-  
-
-  // Liquidate expired loan
-  const liquidateExpiredLoan = async (loanId) => {
-    if (!contract) return;
-    try {
-      const tx = await contract.liquidateExpiredLoan(loanId);
-      showToast("Processing liquidation...", 'info');
-      await tx.wait();
-      showToast("Loan liquidated successfully", 'success');
-      
-      //Update UI
-      await loadLoanRequests();
-      await loadActiveLoans();
-      await updateBalance(account);
-    } catch (error) {
-      console.error("Error liquidating loan:", error);
-      showToast(error.reason || "Error liquidating loan", 'danger');
     }
   };
 
-  // Toast notifications
-  const showToast = (message, variant) => setToast({ show: true, message, variant });
+  const loadLoanRequests = async () => {
+    if (!contract || !account) return;
 
-  // Graphics
+    try {
+      const [, , requestIds, requests] = await contract.getAllActiveLoans();
+
+      const data = requestIds.map((id, i) => ({
+        requestId: id.toString(),
+        borrower: requests[i].borrower,
+        amount: ethers.utils.formatEther(requests[i].loanAmount),
+        duration: requests[i].duration.toString(),
+        stake: ethers.utils.formatEther(requests[i].stake),
+        interestRate: requests[i].interestRate.toString(),
+        isActive: requests[i].isActive,
+      }));
+
+      setLoanRequests(
+        data.filter(
+          (r) => r.isActive && r.borrower.toLowerCase() !== account.toLowerCase()
+        )
+      );
+    } catch (e) {
+      console.error(e);
+      showToast("Error loading loan requests", "danger");
+    }
+  };
+
+  const loadActiveLoans = async () => {
+    if (!contract || !account) return;
+
+    try {
+      const [loanIds, loans] = await contract.getAllActiveLoans();
+
+      const data = loans
+        .map((loan, i) => {
+          const endMs = loan.endTime.toNumber() * 1000;
+          const state = loan.isRepaid
+            ? LoanState.REPAID
+            : Date.now() > endMs
+            ? LoanState.EXPIRED
+            : LoanState.ACTIVE;
+
+          return {
+            loanId: loanIds[i].toString(),
+            borrower: loan.borrower,
+            lender: loan.lender,
+            amount: ethers.utils.formatEther(loan.loanAmount),
+            stake: ethers.utils.formatEther(loan.stake),
+            endTime: new Date(endMs).toLocaleString(),
+            interestRate: loan.interestRate.toString(),
+            initialEthPrice: ethers.utils.formatUnits(loan.initialEthPrice, 18),
+            state,
+          };
+        })
+        .filter((l) => l.lender.toLowerCase() === account.toLowerCase());
+
+      setActiveLoans(data);
+    } catch (e) {
+      console.error(e);
+      showToast("Error loading active loans", "danger");
+    }
+  };
+
+  const fundLoan = async (requestId, amount) => {
+    if (!contract) return;
+
+    try {
+      const amountWei = ethers.utils.parseEther(amount);
+      const price = await getEthPrice();
+
+      if (!price) {
+        showToast("Error fetching ETH price", "danger");
+        return;
+      }
+
+      const initialEthPriceWei = ethers.utils.parseUnits(price.toString(), 18);
+
+      const tx = await contract.fundLoanRequest(requestId, initialEthPriceWei, {
+        value: amountWei,
+      });
+
+      await tx.wait();
+
+      await loadLoanRequests();
+      await loadActiveLoans();
+      await updateBalance(account);
+
+      showToast("Loan funded successfully", "success");
+    } catch (e) {
+      console.error(e);
+      showToast(e?.reason || "Error funding loan", "danger");
+    }
+  };
+
+  const liquidateExpiredLoan = async (loanId) => {
+    if (!contract) return;
+
+    try {
+      const tx = await contract.liquidateExpiredLoan(loanId);
+      await tx.wait();
+
+      await loadLoanRequests();
+      await loadActiveLoans();
+      await updateBalance(account);
+
+      showToast("Loan liquidated successfully", "success");
+    } catch (e) {
+      console.error(e);
+      showToast(e?.reason || "Error liquidating loan", "danger");
+    }
+  };
+
   return (
-    <Container className="mt-5">
-      <Toast 
-        show={toast.show} 
-        onClose={() => setToast({ ...toast, show: false })} 
-        delay={3000} 
-        autohide 
-        style={{ position: 'fixed', top: 20, right: 20, zIndex: 9999 }}
+    <Container className="mt-4">
+      <Toast
+        show={toast.show}
+        onClose={() => setToast({ ...toast, show: false })}
+        delay={3000}
+        autohide
+        style={{ position: "fixed", top: 20, right: 20, zIndex: 9999 }}
       >
-        <Toast.Header><strong className="me-auto">Notification</strong></Toast.Header>
-        <Toast.Body className={`bg-${toast.variant} text-white`}>{toast.message}</Toast.Body>
+        <Toast.Header>
+          <strong className="me-auto">Notification</strong>
+        </Toast.Header>
+        <Toast.Body className={`bg-${toast.variant} text-white`}>
+          {toast.message}
+        </Toast.Body>
       </Toast>
 
       <Card className="mb-4">
         <Card.Header as="h5">Lender Dashboard</Card.Header>
         <Card.Body>
           <Card.Text>Connected Account: {account}</Card.Text>
-          <Card.Text>Balance: {parseFloat(balance).toFixed(4)} ETH</Card.Text>
+          <Card.Text>
+            Balance: {balance ? Number(balance).toFixed(4) : "0"} ETH
+          </Card.Text>
         </Card.Body>
       </Card>
 
       <Card className="mb-4">
         <Card.Header as="h5" className="d-flex justify-content-between align-items-center">
           Available Loan Requests
-          <Button variant="outline-primary" onClick={loadLoanRequests}>Refresh Requests</Button>
+          <Button variant="outline-primary" onClick={loadLoanRequests}>
+            Refresh Requests
+          </Button>
         </Card.Header>
         <Card.Body>
-        <Table responsive>
+          <Table responsive>
             <thead>
               <tr>
-                <th>Loan ID</th>
+                <th>Request ID</th>
                 <th>Borrower</th>
                 <th>Amount</th>
                 <th>Stake</th>
                 <th>Duration</th>
                 <th>Interest Rate</th>
-                <th>Initial ETH Price</th>
                 <th>Status</th>
                 <th>Action</th>
               </tr>
             </thead>
             <tbody>
-              {loanRequests.map((request) => (
-                <tr key={request.requestId}>
-                  <td>{request.requestId}</td>
-                  <td>{request.borrower}</td>
-                  <td>{request.amount} ETH</td>
-                  <td>{request.stake} ETH</td>
-                  <td>{request.duration} days</td>
-                  <td>{request.interestRate}%</td>
-                  <td>{request.isActive === 'ACTIVE' ? `$${request.initialEthPrice}` : 'N/A'}</td>
+              {loanRequests.length === 0 && (
+                <tr><td colSpan="8" className="text-center">No active requests</td></tr>
+              )}
+
+              {loanRequests.map((r) => (
+                <tr key={r.requestId}>
+                  <td>{r.requestId}</td>
+                  <td>{r.borrower}</td>
+                  <td>{r.amount} ETH</td>
+                  <td>{r.stake} ETH</td>
+                  <td>{r.duration} days</td>
+                  <td>{r.interestRate}%</td>
+                  <td><Badge bg="success">ACTIVE</Badge></td>
                   <td>
-                    <Badge bg='success'>
-                      ACTIVE
-                    </Badge>
-                  </td>
-                  <td>
-                    <Button
-                      variant="primary"
-                      onClick={() => fundLoan(request.requestId, request.amount)}
-                    >
+                    <Button variant="primary" onClick={() => fundLoan(r.requestId, r.amount)}>
                       Fund
                     </Button>
                   </td>
@@ -283,7 +275,9 @@ const Lender = () => {
       <Card>
         <Card.Header as="h5" className="d-flex justify-content-between align-items-center">
           Your Funded Loans
-          <Button variant="outline-primary" onClick={loadActiveLoans}>Refresh Loans</Button>
+          <Button variant="outline-primary" onClick={loadActiveLoans}>
+            Refresh Loans
+          </Button>
         </Card.Header>
         <Card.Body>
           <Table responsive>
@@ -295,31 +289,41 @@ const Lender = () => {
                 <th>Stake</th>
                 <th>End Time</th>
                 <th>Interest Rate</th>
+                <th>Initial ETH Price</th>
                 <th>Status</th>
                 <th>Action</th>
               </tr>
             </thead>
             <tbody>
-              {activeLoans.map((loan) => (
-                <tr key={loan.loanId}>
-                  <td>{loan.loanId}</td>
-                  <td>{loan.borrower}</td>
-                  <td>{loan.amount} ETH</td>
-                  <td>{loan.stake} ETH</td>
-                  <td>{loan.endTime}</td>
-                  <td>{loan.interestRate}%</td>
+              {activeLoans.length === 0 && (
+                <tr><td colSpan="9" className="text-center">No funded loans</td></tr>
+              )}
+
+              {activeLoans.map((l) => (
+                <tr key={l.loanId}>
+                  <td>{l.loanId}</td>
+                  <td>{l.borrower}</td>
+                  <td>{l.amount} ETH</td>
+                  <td>{l.stake} ETH</td>
+                  <td>{l.endTime}</td>
+                  <td>{l.interestRate}%</td>
+                  <td>${Number(l.initialEthPrice).toFixed(2)}</td>
                   <td>
-                    <Badge bg={loan.state === LoanState.ACTIVE ? 'warning' : 
-                              (loan.state === LoanState.REPAID ? 'success' : 'danger')}>
-                      {loan.state}
+                    <Badge
+                      bg={
+                        l.state === LoanState.ACTIVE
+                          ? "warning"
+                          : l.state === LoanState.REPAID
+                          ? "success"
+                          : "danger"
+                      }
+                    >
+                      {l.state}
                     </Badge>
                   </td>
                   <td>
-                    {loan.state === LoanState.EXPIRED && (
-                      <Button 
-                        variant="danger" 
-                        onClick={() => liquidateExpiredLoan(loan.loanId)}
-                      >
+                    {l.state === LoanState.EXPIRED && (
+                      <Button variant="danger" onClick={() => liquidateExpiredLoan(l.loanId)}>
                         Liquidate
                       </Button>
                     )}
@@ -334,4 +338,4 @@ const Lender = () => {
   );
 };
 
-export { Lender };
+export default Lender;

@@ -4,17 +4,24 @@ pragma solidity ^0.8.0;
 import "./LoanTypes.sol";
 
 contract LoanStorage {
-    mapping(uint256 => LoanTypes.LoanRequest) public loanRequests;
-    uint256 public totalRequests; //loan requests (not funded already!!)
+    using LoanTypes for LoanTypes.LoanRequest;
+    using LoanTypes for LoanTypes.ActiveLoan;
 
+    mapping(uint256 => LoanTypes.LoanRequest) public loanRequests;
     mapping(uint256 => LoanTypes.ActiveLoan) public activeLoans;
-    uint256 public totalLoans; //loans funded
+
+    uint256 public totalRequests;
+    uint256 public totalLoans;
 
     function getNextRequestId() internal returns (uint256) {
-        return totalRequests++;
+        uint256 id = totalRequests;
+        totalRequests += 1;
+        return id;
     }
 
     function getNextLoanId() internal returns (uint256) {
-        return totalLoans++;
+        uint256 id = totalLoans;
+        totalLoans += 1;
+        return id;
     }
 }

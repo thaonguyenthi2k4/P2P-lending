@@ -1,11 +1,43 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.17;
 
 import "./LoanTypes.sol";
 import "./LoanStorage.sol";
 
 contract LendingPlatform is LoanStorage {
     uint256 public constant MAX_INTEREST_RATE = 7;
+
+    event LoanRequestCreated(
+        uint256 indexed requestId,
+        address indexed borrower,
+        uint256 loanAmount,
+        uint256 durationInDays,
+        uint256 interestRate,
+        uint256 stake
+    );
+
+    event LoanFunded(
+        uint256 indexed loanId,
+        uint256 indexed requestId,
+        address indexed lender,
+        address borrower,
+        uint256 loanAmount,
+        uint256 stake,
+        uint256 initialEthPrice
+    );
+
+    event LoanRepaid(
+        uint256 indexed loanId,
+        address indexed borrower,
+        address indexed lender,
+        uint256 repayAmount
+    );
+
+    event LoanLiquidated(
+        uint256 indexed loanId,
+        address indexed lender,
+        uint256 stake
+    );
 
     function createLoanRequest(
         uint256 _loanAmount,
@@ -14,14 +46,12 @@ contract LendingPlatform is LoanStorage {
     ) external payable {
         require(_loanAmount > 0, "Loan amount must be greater than 0");
         require(_durationInDays > 0, "Duration must be greater than 0");
-        require(msg.value >= _loanAmount * 2, "Insufficient collateral");
-        require(
-            _interestRate <= MAX_INTEREST_RATE,
-            "Interest rate exceeds maximum allowed (7%)"
-        );
         require(_interestRate > 0, "Interest rate must be greater than 0");
+        require(_interestRate <= MAX_INTEREST_RATE, "Interest rate exceeds maximum allowed (7%)");
 
-        // Creating new loan request
+        uint256 minCollateral = _loanAmount * 2;
+        require(msg.value >= minCollateral, "Collateral must be at least 2x loan amount");
+
         uint256 requestId = getNextRequestId();
         LoanTypes.LoanRequest storage request = loanRequests[requestId];
 
@@ -31,6 +61,15 @@ contract LendingPlatform is LoanStorage {
         request.isActive = true;
         request.stake = msg.value;
         request.interestRate = _interestRate;
+
+        emit LoanRequestCreated(
+            requestId,
+            msg.sender,
+            _loanAmount,
+            _durationInDays,
+            _interestRate,
+            msg.value
+        );
     }
 
     function fundLoanRequest(
@@ -40,6 +79,7 @@ contract LendingPlatform is LoanStorage {
         LoanTypes.LoanRequest storage request = loanRequests[_requestId];
 
         require(request.isActive, "Request is not active");
+        require(request.borrower != address(0), "Invalid request");
         require(msg.value == request.loanAmount, "Must send exact loan amount");
 
         uint256 loanId = getNextLoanId();
@@ -53,25 +93,53 @@ contract LendingPlatform is LoanStorage {
         loan.endTime = block.timestamp + (request.duration * 1 days);
         loan.interestRate = request.interestRate;
         loan.initialEthPrice = _initialEthPrice;
+        loan.isRepaid = false;
 
         request.isActive = false;
 
-        payable(request.borrower).transfer(msg.value);
+        // Send principal to borrower
+        payable(request.borrower).transfer(request.loanAmount);
+
+        emit LoanFunded(
+            loanId,
+            _requestId,
+            msg.sender,
+            request.borrower,
+            request.loanAmount,
+            request.stake,
+            _initialEthPrice
+        );
     }
 
-    // Borrower repays loan
-    function repayLoan(
-        uint256 _loanId,
-        uint256 _repayAmount
-    ) external payable {
+    // Simple demo interest in ETH:
+    // total = principal + principal * rate / 100
+    function getRepayAmount(uint256 _loanId) public view returns (uint256) {
+        LoanTypes.ActiveLoan storage loan = activeLoans[_loanId];
+        require(loan.borrower != address(0), "Invalid loan");
+        require(!loan.isRepaid, "Loan already repaid");
+
+        uint256 interest = (loan.loanAmount * loan.interestRate) / 100;
+        return loan.loanAmount + interest;
+    }
+
+    function repayLoan(uint256 _loanId) external payable {
         LoanTypes.ActiveLoan storage loan = activeLoans[_loanId];
 
         require(msg.sender == loan.borrower, "Only borrower can repay");
         require(!loan.isRepaid, "Loan already repaid");
 
+        uint256 due = getRepayAmount(_loanId);
+        require(msg.value == due, "Repay amount mismatch");
+
         loan.isRepaid = true;
-        payable(loan.lender).transfer(_repayAmount);
-        payable(loan.borrower).transfer(loan.stake);
+
+        (bool ok1, ) = payable(loan.lender).call{value: msg.value}("");
+        require(ok1, "Pay lender failed");
+
+        (bool ok2, ) = payable(loan.borrower).call{value: loan.stake}("");
+        require(ok2, "Return stake failed");
+
+        emit LoanRepaid(_loanId, loan.borrower, loan.lender, msg.value);
     }
 
     function checkLoanStatus(
@@ -99,7 +167,6 @@ contract LendingPlatform is LoanStorage {
         );
     }
 
-    // Liquidate expired loan
     function liquidateExpiredLoan(uint256 _loanId) external {
         LoanTypes.ActiveLoan storage loan = activeLoans[_loanId];
 
@@ -107,7 +174,11 @@ contract LendingPlatform is LoanStorage {
         require(block.timestamp > loan.endTime, "Loan is not expired yet");
 
         loan.isRepaid = true;
-        payable(loan.lender).transfer(loan.stake);
+
+        (bool ok, ) = payable(loan.lender).call{value: loan.stake}("");
+        require(ok, "Transfer stake failed");
+
+        emit LoanLiquidated(_loanId, loan.lender, loan.stake);
     }
 
     function getBorrowerActiveLoans(
@@ -130,7 +201,7 @@ contract LendingPlatform is LoanStorage {
         uint256 arrayIndex = 0;
         for (uint256 i = 0; i < totalRequests; i++) {
             if (loanRequests[i].borrower == _borrower) {
-                loanIds[arrayIndex] = i; //the ids are sequentially assigned (see LoanStorage)
+                loanIds[arrayIndex] = i;
                 loans[arrayIndex] = loanRequests[i];
                 arrayIndex++;
             }
@@ -167,7 +238,6 @@ contract LendingPlatform is LoanStorage {
         requests = new LoanTypes.LoanRequest[](requestCount);
 
         uint256 loanIndex = 0;
-        uint256 requestIndex = 0;
         for (uint256 i = 0; i < totalLoans; i++) {
             if (!activeLoans[i].isRepaid) {
                 loanIds[loanIndex] = i;
@@ -175,6 +245,8 @@ contract LendingPlatform is LoanStorage {
                 loanIndex++;
             }
         }
+
+        uint256 requestIndex = 0;
         for (uint256 i = 0; i < totalRequests; i++) {
             if (loanRequests[i].isActive) {
                 requestIds[requestIndex] = i;

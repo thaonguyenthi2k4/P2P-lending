@@ -1,12 +1,13 @@
 import React from "react";
 import { NoWalletDetected } from "./NoWalletDetected";
 import { ConnectWallet } from "./ConnectWallet";
-import { Lender as LenderInterface } from './Lender';
-import { App as BorrowerInterface } from "./Borrower"
+import BorrowerInterface from "./Borrower";
+import LenderInterface from "./Lender";
 
-import { Container, Card, Button, Alert, Nav, Navbar } from 'react-bootstrap';
+import { Container, Card, Button, Alert, Nav, Navbar } from "react-bootstrap";
 
-const HARDHAT_NETWORK_ID = '31337';
+const HARDHAT_CHAIN_ID_DEC = 31337;
+const HARDHAT_CHAIN_ID_HEX = "0x7a69"; // 31337
 
 export class Dapp extends React.Component {
   constructor(props) {
@@ -14,13 +15,63 @@ export class Dapp extends React.Component {
 
     this.initialState = {
       selectedAddress: undefined,
-      loanRequests: [],
-      approvedLoans: [],
       userRole: undefined,
       networkError: undefined,
     };
 
     this.state = this.initialState;
+
+    // bind
+    this._connectWallet = this._connectWallet.bind(this);
+    this._dismissNetworkError = this._dismissNetworkError.bind(this);
+    this._resetState = this._resetState.bind(this);
+    this._initialize = this._initialize.bind(this);
+    this._checkNetwork = this._checkNetwork.bind(this);
+    this._switchChain = this._switchChain.bind(this);
+    this._addHardhatChain = this._addHardhatChain.bind(this);
+
+    this._handleAccountsChanged = this._handleAccountsChanged.bind(this);
+    this._handleChainChanged = this._handleChainChanged.bind(this);
+  }
+
+  componentDidMount() {
+    if (window.ethereum) {
+      // Attach listeners once
+      window.ethereum.on("accountsChanged", this._handleAccountsChanged);
+      window.ethereum.on("chainChanged", this._handleChainChanged);
+    }
+  }
+
+  componentWillUnmount() {
+    if (window.ethereum?.removeListener) {
+      window.ethereum.removeListener(
+        "accountsChanged",
+        this._handleAccountsChanged
+      );
+      window.ethereum.removeListener("chainChanged", this._handleChainChanged);
+    }
+  }
+
+  _handleAccountsChanged(accs) {
+    const newAddress = Array.isArray(accs) ? accs[0] : undefined;
+
+    if (!newAddress) {
+      this._resetState();
+      return;
+    }
+
+    // Reset role to avoid showing old role UI with a new account
+    this.setState({ userRole: undefined });
+    this._initialize(newAddress);
+  }
+
+  _handleChainChanged() {
+    // When chain changes, safest is to reset UI state
+    this.setState({
+      selectedAddress: undefined,
+      userRole: undefined,
+      networkError: undefined,
+    });
   }
 
   render() {
@@ -31,9 +82,9 @@ export class Dapp extends React.Component {
     if (!this.state.selectedAddress) {
       return (
         <ConnectWallet
-          connectWallet={() => this._connectWallet()}
+          connectWallet={this._connectWallet}
           networkError={this.state.networkError}
-          dismiss={() => this._dismissNetworkError()}
+          dismiss={this._dismissNetworkError}
         />
       );
     }
@@ -44,14 +95,16 @@ export class Dapp extends React.Component {
       <div className="dapp-wrapper">
         <Navbar bg="dark" variant="dark" expand="lg">
           <Container>
-            <Navbar.Brand href="#home">DLoan Platform</Navbar.Brand>
+            <Navbar.Brand>DLoan Platform</Navbar.Brand>
             <Navbar.Toggle aria-controls="basic-navbar-nav" />
-            <Navbar.Collapse id="basic-navbar-nav">
+            <Navbar.Collapse>
               <Nav className="me-auto">
-                <Nav.Link href="<Dapp />">Home</Nav.Link>
+                <Nav.Link onClick={() => this.setState({ userRole: undefined })}>
+                  Home
+                </Nav.Link>
               </Nav>
-              <Navbar.Text className="ml-3">
-                Signed in as: <a href="#login">{selectedAddress}</a>
+              <Navbar.Text>
+                Signed in as: <span>{selectedAddress}</span>
               </Navbar.Text>
             </Navbar.Collapse>
           </Container>
@@ -64,19 +117,19 @@ export class Dapp extends React.Component {
               <Card.Body>
                 <Card.Title>Choose Your Role</Card.Title>
                 <Card.Text>
-                  Select your role to get started with our decentralized loan platform.
+                  Select your role to get started with our decentralized loan
+                  platform.
                 </Card.Text>
-                <Button 
-                  variant="primary" 
-                  className="me-2 mr-5 ml-5"
-                  onClick={() => this.setState({ userRole: 'borrower' })}
+                <Button
+                  variant="primary"
+                  className="me-2"
+                  onClick={() => this.setState({ userRole: "borrower" })}
                 >
                   I'm a Borrower
                 </Button>
-                <Button 
+                <Button
                   variant="secondary"
-                  className="me-2 mr-5 ml-5"
-                  onClick={() => this.setState({ userRole: 'lender' })}
+                  onClick={() => this.setState({ userRole: "lender" })}
                 >
                   I'm a Lender
                 </Button>
@@ -88,13 +141,8 @@ export class Dapp extends React.Component {
                 You are logged in as: <strong>{userRole}</strong>
               </Alert>
 
-              {userRole === 'borrower' && (
-                <BorrowerInterface />
-              )}
-
-              {userRole === 'lender' && (
-                <LenderInterface />
-              )}
+              {userRole === "borrower" && <BorrowerInterface />}
+              {userRole === "lender" && <LenderInterface />}
             </>
           )}
         </Container>
@@ -102,22 +150,40 @@ export class Dapp extends React.Component {
     );
   }
 
-
   async _connectWallet() {
-    const [selectedAddress] = await window.ethereum.request({ method: 'eth_requestAccounts' });
-    this._checkNetwork();
-    this._initialize(selectedAddress);
+    try {
+      await this._checkNetwork();
 
-    window.ethereum.on("accountsChanged", ([newAddress]) => {
-      if (newAddress === undefined) {
-        return this._resetState();
+      const accounts = await window.ethereum.request({
+        method: "eth_requestAccounts",
+      });
+
+      const selectedAddress = Array.isArray(accounts)
+        ? accounts[0]
+        : undefined;
+
+      if (!selectedAddress) {
+        this.setState({ networkError: "No account returned from wallet" });
+        return;
       }
-      this._initialize(newAddress);
-    });
+
+      this._initialize(selectedAddress);
+    } catch (err) {
+      console.error(err);
+
+      // User rejected / chain switch rejected
+      const msg =
+        err?.message ||
+        "Failed to connect wallet or switch to Hardhat network";
+
+      this.setState({ networkError: msg });
+    }
   }
 
   _initialize(userAddress) {
-    this.setState({ selectedAddress: userAddress });
+    this.setState({
+      selectedAddress: userAddress,
+    });
   }
 
   _dismissNetworkError() {
@@ -128,18 +194,50 @@ export class Dapp extends React.Component {
     this.setState(this.initialState);
   }
 
-  async _switchChain() {
-    const chainIdHex = `0x${HARDHAT_NETWORK_ID.toString(16)}`;
-    await window.ethereum.request({
-      method: "wallet_switchEthereumChain",
-      params: [{ chainId: chainIdHex }],
-    });
-    await this._initialize(this.state.selectedAddress);
+  async _checkNetwork() {
+    if (!window.ethereum) return;
+
+    // Prefer eth_chainId
+    const chainId = await window.ethereum.request({ method: "eth_chainId" });
+
+    // chainId is hex string like "0x7a69"
+    if (chainId?.toLowerCase() !== HARDHAT_CHAIN_ID_HEX) {
+      await this._switchChain();
+    }
   }
 
-  _checkNetwork() {
-    if (window.ethereum.networkVersion !== HARDHAT_NETWORK_ID) {
-      this._switchChain();
+  async _switchChain() {
+    try {
+      await window.ethereum.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: HARDHAT_CHAIN_ID_HEX }],
+      });
+    } catch (switchError) {
+      // 4902 = unknown chain in MetaMask
+      if (switchError?.code === 4902) {
+        await this._addHardhatChain();
+        return;
+      }
+      throw switchError;
     }
+  }
+
+  async _addHardhatChain() {
+    // Add local Hardhat network config
+    await window.ethereum.request({
+      method: "wallet_addEthereumChain",
+      params: [
+        {
+          chainId: HARDHAT_CHAIN_ID_HEX,
+          chainName: "Hardhat Local",
+          nativeCurrency: {
+            name: "ETH",
+            symbol: "ETH",
+            decimals: 18,
+          },
+          rpcUrls: ["http://127.0.0.1:8545"],
+        },
+      ],
+    });
   }
 }
